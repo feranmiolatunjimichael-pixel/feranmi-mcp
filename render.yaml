@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: feranmi-mcp
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python render_entrypoint.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: BLENDER_HOST
+        value: 127.0.0.1
+      - key: BLENDER_PORT
+        value: 9876
+      - key: SITE_TOKEN
+        generateValue: true
