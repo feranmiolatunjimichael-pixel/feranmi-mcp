@@ -17,7 +17,6 @@ child = subprocess.Popen([
 ])
 
 try:
-    # Give the MCP process a moment to bind before accepting public traffic.
     time.sleep(1)
     start_public_mux("0.0.0.0", public_port, internal_port)
 finally:

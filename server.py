@@ -42,7 +42,7 @@ GODOT_PORT = int(os.environ.get("GODOT_PORT", "9877"))
 SITE_HOST = os.environ.get("SITE_HOST", "0.0.0.0")
 SITE_PORT = int(os.environ.get("SITE_PORT", "8001"))
 SITE_TOKEN = os.environ.get("SITE_TOKEN", "").strip()
-PUBLIC_MCP_URL = os.environ.get("PUBLIC_MCP_URL", "").strip()
+PUBLIC_MCP_URL = (os.environ.get("PUBLIC_MCP_URL", "").strip() or os.environ.get("RENDER_EXTERNAL_URL", "").strip())
 TALK_FILE = os.environ.get(
     "TALK_FILE",
     os.path.join(tempfile.gettempdir(), "feranmi_mcp_talk.json"),
@@ -3505,6 +3505,8 @@ def start_public_mux(host: str, public_port: int, mcp_port: int) -> None:
                 return self._send(200, {"messages": rows[-50:], "file": TALK_FILE})
             if path == "/turbowarp-extension.js":
                 return self._send(200, _turbowarp_extension_js(), "application/javascript; charset=utf-8")
+            if path == "/mcp-info":
+                return self._send(200, {"mcp": (PUBLIC_MCP_URL.rstrip("/") if PUBLIC_MCP_URL else "") + "/mcp", "turbowarp_extension": (PUBLIC_MCP_URL.rstrip("/") if PUBLIC_MCP_URL else "") + "/turbowarp-extension.js", "token_required": bool(SITE_TOKEN), "roblox_configured": bool(ROBLOX_API_KEY and ROBLOX_UNIVERSE_ID)})
             if path.startswith("/mcp"):
                 return self._proxy(mcp_port)
             self._send(404, {"error": "not found", "hint": "use /mcp or /talk"})
