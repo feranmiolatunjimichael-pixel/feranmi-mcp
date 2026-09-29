@@ -3400,7 +3400,7 @@ def start_site_server() -> None:
 
         def _send(self, code: int, body: Any, content_type: str = "application/json"):
             raw = body if isinstance(body, bytes) else (
-                body.encode("utf-8") if content_type.startswith("text/") else json.dumps(body).encode("utf-8")
+                body.encode("utf-8") if isinstance(body, str) else json.dumps(body).encode("utf-8")
             )
             self.send_response(code)
             self.send_header("Content-Type", content_type)
@@ -3475,7 +3475,7 @@ def start_public_mux(host: str, public_port: int, mcp_port: int) -> None:
     class Mux(BaseHTTPRequestHandler):
         def _send(self, code: int, body: Any, content_type: str = "application/json"):
             raw = body if isinstance(body, bytes) else (
-                body.encode("utf-8") if content_type.startswith("text/") else json.dumps(body).encode("utf-8")
+                body.encode("utf-8") if isinstance(body, str) else json.dumps(body).encode("utf-8")
             )
             self.send_response(code)
             self.send_header("Content-Type", content_type)
