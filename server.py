@@ -3577,6 +3577,92 @@ def _selftest():
         sys.exit(1)
 
 
+
+
+@mcp.tool()
+def godot_bind_wasd() -> dict:
+    """Bind WASD to ui_left/right/up/down and add reload on R."""
+    return call_godot("execute", {"code": """
+func run(tree):
+	for pair in [["ui_left", KEY_A], ["ui_right", KEY_D], ["ui_up", KEY_W], ["ui_down", KEY_S]]:
+		var ev = InputEventKey.new()
+		ev.physical_keycode = pair[1]
+		InputMap.action_add_event(pair[0], ev)
+	if not InputMap.has_action("reload"):
+		InputMap.add_action("reload")
+	var r = InputEventKey.new()
+	r.physical_keycode = KEY_R
+	InputMap.action_add_event("reload", r)
+	return {"wasd": true, "reload": true}
+"""})
+
+
+@mcp.tool()
+def godot_fix_first_person() -> dict:
+    """Move the live camera onto the head and show the weapon viewmodel."""
+    return call_godot("execute", {"code": """
+func run(tree):
+	var p = tree.current_scene.get_node_or_null("player")
+	if p == null:
+		return {"error": "no player"}
+	var pivot = p.get_node_or_null("Head/CameraPivot")
+	var cam = p.get_node_or_null("Head/CameraPivot/Camera3D")
+	var hold = p.get_node_or_null("Head/CameraPivot/WeaponHolder")
+	var body = p.get_node_or_null("Running")
+	if pivot: pivot.position = Vector3.ZERO
+	if cam: cam.position = Vector3(0.12, 0.08, 0)
+	if hold:
+		hold.visible = true
+		hold.position = Vector3(0.22, -0.12, -0.35)
+	if body: body.visible = false
+	return {"ok": true}
+"""})
+
+
+@mcp.tool()
+def godot_add_kill_respawn(y_limit: float = -20.0) -> dict:
+    """Respawn the player if they fall below y_limit."""
+    return call_godot("execute", {"code": f"""
+func run(tree):
+	var p = tree.current_scene.get_node_or_null("player")
+	if p == null:
+		return {{"error": "no player"}}
+	p.set_meta("spawn", p.global_position)
+	if p.get_node_or_null("Safety"):
+		return {{"ok": true, "already": true}}
+	var src = "extends Node\\nfunc _physics_process(_d):\\n\\tvar p = get_parent()\\n\\tif p and p.global_position.y < {y_limit}:\\n\\t\\tvar s = p.get_meta(\\"spawn\\", Vector3(0,2,0))\\n\\t\\tp.global_position = s + Vector3(0,1,0)\\n\\t\\tp.velocity = Vector3.ZERO\\n"
+	DirAccess.make_dir_recursive_absolute("res://gameplay")
+	var f = FileAccess.open("res://gameplay/safety.gd", FileAccess.WRITE)
+	f.store_string(src)
+	f.close()
+	var n = Node.new()
+	n.name = "Safety"
+	n.set_script(load("res://gameplay/safety.gd"))
+	p.add_child(n)
+	return {{"ok": true}}
+"""})
+
+
+@mcp.tool()
+def roblox_publish_message(topic: str, message: str) -> dict:
+    """Publish a MessagingService message through Roblox Open Cloud."""
+    return _roblox_request(
+        f"universes/{urllib.parse.quote(ROBLOX_UNIVERSE_ID, safe='')}/messaging-service/topics/{urllib.parse.quote(topic, safe='')}/messages",
+        "POST",
+        {"message": message[:1000]},
+    )
+
+
+@mcp.tool()
+def roblox_delete_data_store_entry(data_store_id: str, entry_id: str) -> dict:
+    """Delete one Roblox data-store entry."""
+    u = urllib.parse.quote(ROBLOX_UNIVERSE_ID, safe="")
+    ds = urllib.parse.quote(data_store_id, safe="")
+    eid = urllib.parse.quote(entry_id, safe="")
+    return _roblox_request(f"universes/{u}/data-stores/{ds}/entries/{eid}", "DELETE")
+
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Blender MCP server (Peak modeling upgrade)")
     parser.add_argument("--selftest", action="store_true")

@@ -3,19 +3,17 @@ services:
     name: feranmi-mcp
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python render_entrypoint.py
+    buildCommand: python -m pip install -r requirements.txt
+    startCommand: python cloud_relay.py
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.8
-      - key: BLENDER_HOST
-        value: 127.0.0.1
-      - key: BLENDER_PORT
-        value: 9876
-      - key: GODOT_HOST
-        value: 127.0.0.1
-      - key: GODOT_PORT
-        value: 9877
       - key: SITE_TOKEN
         generateValue: true
+      - key: ROBLOX_API_KEY
+        sync: false
+      - key: ROBLOX_UNIVERSE_ID
+        sync: false
+      - key: ROBLOX_PLACE_ID
+        sync: false

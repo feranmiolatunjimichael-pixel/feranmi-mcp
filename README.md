@@ -1,43 +1,84 @@
-# Feranmi MCP on Render
+# Feranmi stable URL
 
-One Render HTTPS service exposes all browser/cloud integrations:
+Browser AIs cannot see `127.0.0.1`. Render also cannot see your Blender.
+This package splits the two jobs.
 
-- `GET /health` — Render health check
-- `GET /` — bridge landing page
-- `GET /mcp-info` — integration URLs and token status
-- `/mcp` — streamable HTTP MCP endpoint
-- `GET /turbowarp-extension.js` — TurboWarp extension
-- `POST /api/turbowarp` — TurboWarp API
-- `/talk` — talk board API
+```
+Browser AI
+    |
+    |  https://YOUR-SERVICE.onrender.com/mcp     stable URL
+    v
+Render  cloud_relay.py
+    ^
+    |  PC dials OUT (no router setup)
+    |
+local_agent.py
+    |
+    v
+server.py :8000
+    |-- 9876 Blender
+    |-- 9877 Godot
+```
 
-## TurboWarp
+Talk (`/talk`) lives on Render, so Claude and Grok can chat even if Blender is closed.
+`/mcp` only works while `local_agent.py` is running.
 
-After deployment, load this URL in TurboWarp as a custom extension:
+TurboWarp extension (stable URL):
 
-`https://YOUR-RENDER-SERVICE.onrender.com/turbowarp-extension.js`
+`https://YOUR-SERVICE.onrender.com/turbowarp-extension.js`
 
-The extension calls the same Render origin, so no second URL is needed.
+Roblox Open Cloud runs on Render, not on the PC. Set these on Render:
 
-## Roblox Open Cloud
+- `ROBLOX_API_KEY`
+- `ROBLOX_UNIVERSE_ID`
+- `ROBLOX_PLACE_ID`
 
-In Render, open **Environment > Environment Variables** and add:
+Check with `GET /api/roblox/status`.
 
-- `ROBLOX_API_KEY` — secret Roblox Open Cloud API key
-- `ROBLOX_UNIVERSE_ID` — numeric universe ID
-- `ROBLOX_PLACE_ID` — numeric place ID, required for instance/script tools
+The local `server.py` still has the full Roblox MCP tools. Those ride through `/mcp` when the PC agent is online. TurboWarp cannot control the Scratch project from the cloud; the extension only calls this server.
 
-The server includes status, data-store, instance, script-update, and operation-polling MCP tools.
-Never commit `ROBLOX_API_KEY` to GitHub.
+## Render (once)
 
-## MCP authentication
+1. Push this folder to GitHub.
+2. Render: New Blueprint, pick `render.yaml`.
+3. Copy the service URL and the generated `SITE_TOKEN`.
 
-Render generates `SITE_TOKEN`. Use it as a Bearer token if the MCP client asks for authentication:
+That URL does not change when you restart your PC.
 
-`Authorization: Bearer YOUR_SITE_TOKEN`
+Free Render sleeps after about 15 minutes of no traffic. The URL stays the same.
+The first hit after sleep can take 30–60 seconds.
 
-## Blender/Godot networking note
+## PC (every session)
 
-Render cannot reach Blender or Godot running on your personal computer through
-`127.0.0.1`. For live local-app control, run the bridge locally with a secure
-Cloudflare Tunnel/reverse relay, or run the applications on the same host as the
-server. Do not expose ports 9876 or 9877 directly to the internet.
+```bat
+python server.py --transport http --host 127.0.0.1 --port 8000
+set RELAY_URL=https://YOUR-SERVICE.onrender.com
+set SITE_TOKEN=the-render-token
+python local_agent.py
+```
+
+Blender Start Server (9876) and Godot Play (9877) stay as they are.
+
+## Browser AI connector
+
+```
+https://YOUR-SERVICE.onrender.com/mcp
+```
+
+If it asks for a header:
+
+```
+Authorization: Bearer YOUR_SITE_TOKEN
+```
+
+Team chat:
+
+```
+https://YOUR-SERVICE.onrender.com/talk
+```
+
+## What was wrong before
+
+The old entrypoint started the Blender server *on Render* and set
+`BLENDER_HOST=127.0.0.1`. That is Render's own loopback, not your PC.
+Port 9876 on Render is empty, so every tool timed out.
