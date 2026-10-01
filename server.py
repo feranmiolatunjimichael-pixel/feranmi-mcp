@@ -2302,12 +2302,78 @@ def modeling_playbook() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Local-first diagnostics / project helpers
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def feranmi_system_status() -> dict:
+    """Return a compact local diagnostic without exposing secrets."""
+    return {
+        "status": "success",
+        "server": "FeranmiMCP Local-First",
+        "transport_defaults": {"mcp": "127.0.0.1:8000", "site": f"{SITE_HOST}:{SITE_PORT}"},
+        "blender": {"host": BLENDER_HOST, "port": BLENDER_PORT},
+        "godot": {"host": GODOT_HOST, "port": GODOT_PORT},
+        "openai_agent": {"enabled": OPENAI_AGENT_ENABLED if 'OPENAI_AGENT_ENABLED' in globals() else False,
+                          "configured": bool(os.environ.get("OPENAI_API_KEY", "").strip()),
+                          "max_turns": int(os.environ.get("OPENAI_AGENT_MAX_TURNS", "4"))},
+        "roblox": {"configured": bool(os.environ.get("ROBLOX_API_KEY", "").strip() and os.environ.get("ROBLOX_UNIVERSE_ID", "").strip())},
+        "turbowarp": {"available": True},
+        "security": {"mcp_http_token_enabled": bool(os.environ.get("MCP_HTTP_TOKEN", "").strip())},
+    }
+
+
+@mcp.tool()
+def feranmi_ping_all() -> dict:
+    """Ping Blender and Godot and return a compact connection report."""
+    blender = call_blender("ping")
+    godot = call_godot("ping")
+    return {
+        "status": "success" if blender.get("status") in {"success", "ok"} and godot.get("status") in {"success", "ok"} else "partial",
+        "blender": blender,
+        "godot": godot,
+    }
+
+
+@mcp.tool()
+def project_snapshot(include_blender: bool = True, include_godot: bool = True) -> dict:
+    """Build a compact project snapshot for an AI agent before it edits anything."""
+    out = {"status": "success", "timestamp": time.time()}
+    if include_blender:
+        scene = get_scene_summary()
+        out["blender"] = scene
+    if include_godot:
+        out["godot"] = godot_project_status()
+    out["collaboration"] = read_ai_messages("snapshot", 0, 12)
+    return out
+
+
+@mcp.tool()
+def agent_budget_status() -> dict:
+    """Show local safeguards around the optional OpenAI agent; never returns the API key."""
+    return {
+        "enabled": OPENAI_AGENT_ENABLED,
+        "api_key_configured": bool(OPENAI_API_KEY),
+        "model": OPENAI_AGENT_MODEL,
+        "default_max_turns": OPENAI_AGENT_MAX_TURNS,
+        "hard_max_turns_per_call": 8,
+        "max_tool_output_chars": OPENAI_AGENT_MAX_TOOL_OUTPUT_CHARS,
+    }
+
+
+# ---------------------------------------------------------------------------
 # AI agent layer (optional OpenAI Responses API)
 # ---------------------------------------------------------------------------
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_AGENT_MODEL = os.environ.get("OPENAI_AGENT_MODEL", "gpt-5.6-luna").strip()
-OPENAI_AGENT_MAX_TURNS = int(os.environ.get("OPENAI_AGENT_MAX_TURNS", "8"))
+# Cost guard: autonomous work is intentionally bounded. Override per call when needed.
+OPENAI_AGENT_MAX_TURNS = int(os.environ.get("OPENAI_AGENT_MAX_TURNS", "4"))
+OPENAI_AGENT_MAX_OUTPUT_CHARS = int(os.environ.get("OPENAI_AGENT_MAX_OUTPUT_CHARS", "12000"))
+OPENAI_AGENT_MAX_TOOL_OUTPUT_CHARS = int(os.environ.get("OPENAI_AGENT_MAX_TOOL_OUTPUT_CHARS", "12000"))
+OPENAI_AGENT_ENABLED = os.environ.get("OPENAI_AGENT_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+MCP_HTTP_TOKEN = os.environ.get("MCP_HTTP_TOKEN", "").strip()
+
 
 
 def _agent_tool_defs() -> list:
@@ -2376,6 +2442,13 @@ def _openai_agent_call(instructions: str, input_items: list) -> dict:
         return {"status":"error","message":f"OpenAI agent request failed: {exc}"}
 
 
+def _trim_agent_output(value: Any, limit: int = OPENAI_AGENT_MAX_TOOL_OUTPUT_CHARS) -> str:
+    raw = json.dumps(value, default=str, ensure_ascii=False)
+    if len(raw) <= limit:
+        return raw
+    return raw[:limit] + "\n...[tool output truncated by FeranmiMCP cost guard]"
+
+
 def _response_text(resp: dict) -> str:
     if isinstance(resp.get("output_text"), str):
         return resp["output_text"]
@@ -2395,9 +2468,11 @@ def mcp_agent(task: str, context: str = "", max_turns: Optional[int] = None) -> 
     Requires OPENAI_API_KEY. The agent is deliberately given a compact tool set and a turn limit.
     It must inspect before editing, verify after editing, and report blockers instead of guessing.
     """
+    if not OPENAI_AGENT_ENABLED:
+        return {"status":"error","message":"mcp_agent is disabled by OPENAI_AGENT_ENABLED=0."}
     if not OPENAI_API_KEY:
         return {"status":"error","message":"Set OPENAI_API_KEY to enable mcp_agent. No key is stored in this source file."}
-    turns = max(1, min(int(max_turns or OPENAI_AGENT_MAX_TURNS), 16))
+    turns = max(1, min(int(max_turns or OPENAI_AGENT_MAX_TURNS), 8))
     instructions = """You are the autonomous engineering agent inside FeranmiMCP. You are working on a Godot/Blender game project shared by several AI agents. Inspect before changing anything. Prefer small reversible changes. Never claim success without verification. Coordinate through the shared team-message tools when another agent needs to know something. You have access only to the tools explicitly supplied to you. Do not expose or request secrets. If a task is ambiguous, inspect the project and make the safest reasonable interpretation."""
     if context:
         instructions += "\nAdditional project context:\n" + context[:8000]
@@ -2408,7 +2483,7 @@ def mcp_agent(task: str, context: str = "", max_turns: Optional[int] = None) -> 
             return resp
         calls = [x for x in (resp.get("output") or []) if x.get("type") == "function_call"]
         if not calls:
-            return {"status":"success","result":{"turns":turn+1,"message":_response_text(resp),"model":OPENAI_AGENT_MODEL}}
+            return {"status":"success","result":{"turns":turn+1,"message":_response_text(resp)[:OPENAI_AGENT_MAX_OUTPUT_CHARS],"model":OPENAI_AGENT_MODEL}}
         items.extend(resp.get("output") or [])
         for call in calls:
             try:
@@ -2416,7 +2491,7 @@ def mcp_agent(task: str, context: str = "", max_turns: Optional[int] = None) -> 
                 result = _agent_dispatch(call.get("name", ""), args)
             except Exception as exc:
                 result = {"status":"error","message":str(exc)}
-            items.append({"type":"function_call_output","call_id":call.get("call_id"),"output":json.dumps(result, default=str)})
+            items.append({"type":"function_call_output","call_id":call.get("call_id"),"output":_trim_agent_output(result)})
     return {"status":"success","result":{"turns":turns,"message":"Agent reached its turn limit. Inspect the latest project state before continuing.","model":OPENAI_AGENT_MODEL}}
 
 
@@ -2889,6 +2964,59 @@ def connection_map() -> dict:
 
 _talk_lock = threading.Lock()
 
+# --- TurboWarp remote command relay ---
+# Browsers can't accept inbound connections the way Blender/Godot addons do,
+# so this works in reverse: Claude enqueues a command, the live TurboWarp tab
+# polls for it (poll loop in the extension JS below) and executes it against
+# the real Scratch VM, then posts the result back. Same end result as
+# call_blender/call_godot -- a blocking call that returns real data -- just a
+# different transport because of browser sandboxing.
+_tw_lock = threading.Lock()
+_tw_queue: list = []
+_tw_results: dict = {}
+_tw_next_id = [1]
+
+
+def _tw_enqueue(action: str, params: dict) -> str:
+    with _tw_lock:
+        cmd_id = str(_tw_next_id[0])
+        _tw_next_id[0] += 1
+        cmd = {"id": cmd_id, "action": action}
+        cmd.update(params or {})
+        _tw_queue.append(cmd)
+    return cmd_id
+
+
+def _tw_pop_next() -> Optional[dict]:
+    with _tw_lock:
+        if _tw_queue:
+            return _tw_queue.pop(0)
+    return None
+
+
+def _tw_store_result(cmd_id: str, result: dict) -> None:
+    with _tw_lock:
+        _tw_results[cmd_id] = result
+
+
+def turbowarp_remote_call(action: str, params: Optional[dict] = None, timeout: float = 10.0) -> dict:
+    cmd_id = _tw_enqueue(action, params or {})
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with _tw_lock:
+            if cmd_id in _tw_results:
+                return _tw_results.pop(cmd_id)
+        time.sleep(0.1)
+    with _tw_lock:
+        _tw_queue[:] = [c for c in _tw_queue if c.get("id") != cmd_id]
+    return {
+        "status": "error",
+        "message": f"No TurboWarp tab answered within {timeout}s. Is the project open in a "
+                    f"browser tab with the Feranmi MCP extension loaded (it must be actively "
+                    f"running, not just added)?",
+    }
+
+
 
 def _authorized(header_token: str) -> bool:
     if not SITE_TOKEN:
@@ -3263,6 +3391,38 @@ def roblox_wait_operation(operation_path: str, attempts: int = 10, delay_seconds
 # TurboWarp talks to the same server through a small CORS-enabled HTTP API.
 # The extension is served by this server, so there is only one public origin.
 
+@mcp.tool()
+def turbowarp_list_sprites(timeout: float = 10.0) -> dict:
+    """List every sprite in the currently-open TurboWarp project, with live
+    x/y position and visibility -- requires the project to actually be open
+    in a browser tab with the Feranmi MCP extension running (not just added
+    to the project; the tab must be open right now)."""
+    return turbowarp_remote_call("list_sprites", {}, timeout)
+
+
+@mcp.tool()
+def turbowarp_sprite_info(name: str, timeout: float = 10.0) -> dict:
+    """Get live details (position, direction, size, current costume,
+    visibility) for one sprite by name in the open TurboWarp project."""
+    return turbowarp_remote_call("sprite_info", {"name": name}, timeout)
+
+
+@mcp.tool()
+def turbowarp_set_sprite_position(name: str, x: float, y: float, timeout: float = 10.0) -> dict:
+    """Move a sprite to an exact x/y position in the live, open TurboWarp
+    project (Scratch coordinate space: origin at stage center, x -240..240,
+    y -180..180)."""
+    return turbowarp_remote_call("set_sprite_position", {"name": name, "x": x, "y": y}, timeout)
+
+
+@mcp.tool()
+def turbowarp_broadcast(message: str, timeout: float = 10.0) -> dict:
+    """Fire a Scratch broadcast message in the live, open TurboWarp project,
+    triggering any "when I receive [message]" hat blocks exactly as if a
+    block in the project had broadcast it."""
+    return turbowarp_remote_call("broadcast", {"message": message}, timeout)
+
+
 def _turbowarp_extension_js() -> str:
     server = PUBLIC_MCP_URL.rstrip("/") if PUBLIC_MCP_URL else ""
     return r"""(function(Scratch) {
@@ -3331,7 +3491,74 @@ def _turbowarp_extension_js() -> str:
     },
     lastResult() { return this._last; }
   };
+
+  // --- Remote control relay: lets Claude (via the MCP server) drive this
+  // project directly, the same way it drives Blender/Godot -- not just the
+  // project's own blocks calling out. Polls for pending commands and
+  // executes them against the live VM automatically once this extension is
+  // loaded and running. No block needed to turn this on, same as how
+  // Blender's addon starts listening once its server is started.
+  function _execRemote(cmd) {
+    const action = cmd.action;
+    if (action === "list_sprites") {
+      const sprites = ext._targets().filter(t => !t.isStage).map(t => ({
+        name: t.getName ? t.getName() : (t.sprite?.name || t.name),
+        x: t.x, y: t.y, visible: t.visible
+      }));
+      return {status: "success", result: sprites};
+    }
+    if (action === "sprite_info") {
+      const wanted = String(cmd.name || "").toLowerCase();
+      const t = ext._targets().find(t => String(t.getName ? t.getName() : (t.sprite?.name || t.name)).toLowerCase() === wanted);
+      if (!t) return {status: "error", message: "sprite not found: " + cmd.name};
+      return {status: "success", result: {
+        name: t.getName ? t.getName() : (t.sprite?.name || t.name),
+        x: t.x, y: t.y, direction: t.direction, visible: t.visible,
+        size: t.size, currentCostume: t.currentCostume
+      }};
+    }
+    if (action === "set_sprite_position") {
+      const wanted = String(cmd.name || "").toLowerCase();
+      const t = ext._targets().find(t => String(t.getName ? t.getName() : (t.sprite?.name || t.name)).toLowerCase() === wanted);
+      if (!t || typeof t.setXY !== "function") return {status: "error", message: "sprite not found or cannot move: " + cmd.name};
+      t.setXY(Number(cmd.x), Number(cmd.y));
+      return {status: "success", result: {moved: cmd.name, x: cmd.x, y: cmd.y}};
+    }
+    if (action === "broadcast") {
+      try {
+        if (Scratch.vm?.runtime?.startHats) {
+          Scratch.vm.runtime.startHats("event_whenbroadcastreceived", {BROADCAST_OPTION: String(cmd.message || "")});
+        }
+      } catch (_) {}
+      return {status: "success", result: {broadcast: cmd.message}};
+    }
+    return {status: "error", message: "unknown remote action: " + action};
+  }
+
+  let _pollTimer = null;
+  function _startRemotePolling() {
+    if (_pollTimer) return;
+    _pollTimer = setInterval(() => {
+      fetch(SERVER + "/api/turbowarp/poll")
+        .then(r => r.json())
+        .then(data => {
+          const cmd = data && data.command;
+          if (!cmd) return;
+          let result;
+          try { result = _execRemote(cmd); }
+          catch (e) { result = {status: "error", message: String(e)}; }
+          return fetch(SERVER + "/api/turbowarp/result", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({id: cmd.id, result})
+          });
+        })
+        .catch(() => {});
+    }, 400);
+  }
+
   Scratch.extensions.register(ext);
+  _startRemotePolling();
 })(Scratch);
 """.replace("__SERVER__", server)
 
@@ -3430,6 +3657,9 @@ def start_site_server() -> None:
                 return self._send(200, {"messages": rows[-50:], "file": TALK_FILE})
             if path == "/turbowarp-extension.js":
                 return self._send(200, _turbowarp_extension_js(), "application/javascript; charset=utf-8")
+            if path == "/api/turbowarp/poll":
+                cmd = _tw_pop_next()
+                return self._send(200, {"command": cmd})
             if path == "/mcp-info":
                 return self._send(200, {"mcp": PUBLIC_MCP_URL or "http://127.0.0.1:8000/mcp", "turbowarp_extension": (PUBLIC_MCP_URL.rstrip("/") if PUBLIC_MCP_URL else "") + "/turbowarp-extension.js", "token_required": bool(SITE_TOKEN)})
             self._send(404, {"error": "not found"})
@@ -3447,6 +3677,12 @@ def start_site_server() -> None:
             if path == "/api/turbowarp":
                 result = _turbowarp_result(data.get("action", ""), data)
                 return self._send(200 if result.get("status") != "error" else 400, result)
+            if path == "/api/turbowarp/result":
+                cmd_id = str(data.get("id") or "")
+                if not cmd_id:
+                    return self._send(400, {"error": "id required"})
+                _tw_store_result(cmd_id, data.get("result") or {})
+                return self._send(200, {"ok": True})
             if path == "/talk":
                 text = str(data.get("text") or "")[:2000]
                 if not text:
@@ -3505,6 +3741,9 @@ def start_public_mux(host: str, public_port: int, mcp_port: int) -> None:
                 return self._send(200, {"messages": rows[-50:], "file": TALK_FILE})
             if path == "/turbowarp-extension.js":
                 return self._send(200, _turbowarp_extension_js(), "application/javascript; charset=utf-8")
+            if path == "/api/turbowarp/poll":
+                cmd = _tw_pop_next()
+                return self._send(200, {"command": cmd})
             if path == "/mcp-info":
                 return self._send(200, {"mcp": (PUBLIC_MCP_URL.rstrip("/") if PUBLIC_MCP_URL else "") + "/mcp", "turbowarp_extension": (PUBLIC_MCP_URL.rstrip("/") if PUBLIC_MCP_URL else "") + "/turbowarp-extension.js", "token_required": bool(SITE_TOKEN), "roblox_configured": bool(ROBLOX_API_KEY and ROBLOX_UNIVERSE_ID)})
             if path.startswith("/mcp"):
@@ -3522,6 +3761,18 @@ def start_public_mux(host: str, public_port: int, mcp_port: int) -> None:
                     return self._send(400, {"error":"invalid json"})
                 result = _turbowarp_result(data.get("action", ""), data)
                 return self._send(200 if result.get("status") != "error" else 400, result)
+            if path == "/api/turbowarp/result":
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b"{}"
+                try:
+                    data = json.loads(raw.decode("utf-8") or "{}")
+                except json.JSONDecodeError:
+                    return self._send(400, {"error": "invalid json"})
+                cmd_id = str(data.get("id") or "")
+                if not cmd_id:
+                    return self._send(400, {"error": "id required"})
+                _tw_store_result(cmd_id, data.get("result") or {})
+                return self._send(200, {"ok": True})
             if path == "/talk":
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length) if length else b"{}"
@@ -3663,20 +3914,59 @@ def roblox_delete_data_store_entry(data_store_id: str, entry_id: str) -> dict:
 
 
 
+def _port_is_free(host: str, port: int) -> bool:
+    import socket as _socket
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    try:
+        s.bind((host if host != "0.0.0.0" else "127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Blender MCP server (Peak modeling upgrade)")
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--transport", choices=["stdio", "http"], default="stdio")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--public-port", type=int, default=None,
+                         help="If set (http transport only), also starts a single public mux "
+                              "server on this port that proxies /mcp* to the internal MCP port "
+                              "and serves /talk directly. Tunnel THIS one port -- both MCP "
+                              "clients (Manus, etc.) and browser-only clients (Grok) can share "
+                              "the same URL: <tunnel>/mcp and <tunnel>/talk.")
+    parser.add_argument("--no-site", action="store_true",
+                         help="Skip starting the local talk-board site (port %d). Use this for "
+                              "a stdio instance (e.g. the one Claude Desktop spawns) running "
+                              "alongside a separate --transport http instance, so they don't "
+                              "both try to bind the same talk-board port." % SITE_PORT)
     args = parser.parse_args()
     if args.selftest:
         _selftest()
     else:
-        start_site_server()
+        if not args.no_site:
+            if _port_is_free(SITE_HOST, SITE_PORT):
+                start_site_server()
+            else:
+                print(f"[site] port {SITE_PORT} already in use (probably another instance of "
+                      f"this server already running) -- skipping, not crashing. That other "
+                      f"instance's talk board is the one actually in use.", file=sys.stderr)
+
         if args.transport == "http":
-            print(f"MCP  http://{args.host}:{args.port}/mcp", file=sys.stderr)
+            print(f"MCP (internal) http://{args.host}:{args.port}/mcp", file=sys.stderr)
             print(f"Talk http://127.0.0.1:{SITE_PORT}/talk  file={TALK_FILE}", file=sys.stderr)
+            if args.public_port:
+                mux_thread = threading.Thread(
+                    target=start_public_mux,
+                    args=(args.host, args.public_port, args.port),
+                    name="mcp-public-mux",
+                    daemon=True,
+                )
+                mux_thread.start()
+                print(f"Public (tunnel THIS one): http://{args.host}:{args.public_port}/mcp and /talk", file=sys.stderr)
             mcp.run(transport="streamable-http", host=args.host, port=args.port)
         else:
             mcp.run(transport="stdio")
